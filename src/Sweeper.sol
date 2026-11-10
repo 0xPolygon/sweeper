@@ -15,9 +15,6 @@ contract Sweeper {
         RECOVERY = recovery;
     }
 
-    /// @notice Accepts POL; must stay empty to work with low gas stipends.
-    receive() external payable {}
-
     /// @notice Sends the full native balance to RECOVERY. No-op on zero balance.
     function sweep() external {
         uint256 amount = address(this).balance;

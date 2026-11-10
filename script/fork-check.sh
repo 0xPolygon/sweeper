@@ -30,13 +30,12 @@ trap 'kill "$ANVIL_PID" 2>/dev/null || true' EXIT
 for _ in $(seq 100); do cast chain-id --rpc-url "$RPC" >/dev/null 2>&1 && break; sleep 0.2; done
 echo "fork block: $(cast block-number --rpc-url "$RPC")"
 
-FROM="$(cast rpc --rpc-url "$RPC" eth_accounts | tr -d '[]" ' | cut -d, -f1)"
+FROM=0x00000000000000000000000000000000000ca11e
+cast rpc --rpc-url "$RPC" anvil_impersonateAccount "$FROM" >/dev/null
+cast rpc --rpc-url "$RPC" anvil_setBalance "$FROM" 0x56BC75E2D63100000 >/dev/null
 
 runtime_for() {
-  local addr
-  addr="$(forge create src/Sweeper.sol:Sweeper --rpc-url "$RPC" --unlocked --from "$FROM" --broadcast --json \
-    --constructor-args "$1" 2>/dev/null | jq -r .deployedTo)"
-  cast code "$addr" --rpc-url "$RPC"
+  script/runtime-code.sh "$1" | awk '/^runtime:/ {print $2}'
 }
 
 echo
@@ -85,7 +84,8 @@ cast rpc --rpc-url "$RPC" anvil_stopImpersonatingAccount "$A1" >/dev/null
 
 echo
 echo "== EIP-7702 authorization signed for an address with the sweeper code =="
-IMPL="$(forge create test/Sweeper.t.sol:MockToken --rpc-url "$RPC" --unlocked --from "$FROM" --broadcast --json 2>/dev/null | jq -r .deployedTo)"
+IMPL=0x00000000000000000000000000000000000017e1
+cast rpc --rpc-url "$RPC" anvil_setCode "$IMPL" 0x00 >/dev/null
 AUTH_NONCE="$(cast nonce "$CODED" --rpc-url "$RPC")"
 CHAIN_ID="$(cast chain-id --rpc-url "$RPC")"
 AUTH="$(cast wallet sign-auth "$IMPL" --private-key "$PK" --nonce "$AUTH_NONCE" --chain "$CHAIN_ID" 2>/dev/null)"

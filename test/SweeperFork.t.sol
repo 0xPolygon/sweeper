@@ -23,6 +23,11 @@ interface IChildChain {
     function onStateReceive(uint256 id, bytes calldata data) external;
 }
 
+interface IStateReceiver {
+    function lastStateId() external view returns (uint256);
+    function commitState(uint256 syncTime, bytes calldata recordBytes) external returns (bool);
+}
+
 interface IUSDT0 {
     function isBlocked(address) external view returns (bool);
     function nonces(address) external view returns (uint256);
@@ -93,6 +98,9 @@ contract SweeperForkTest is Test {
 
     IMRC20 constant POL = IMRC20(0x0000000000000000000000000000000000001010);
     address constant STATE_RECEIVER = 0x0000000000000000000000000000000000001001;
+    address constant SYSTEM_ADDRESS = 0xffffFFFfFFffffffffffffffFfFFFfffFFFfFFfE;
+
+    event StateCommitted(uint256 indexed stateId, bool success);
     address constant USDT0 = 0xc2132D05D31c914a87C6611C10748AEb04B58e8F;
     address constant USDC = 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359;
     address constant USDC_E = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
@@ -239,42 +247,84 @@ contract SweeperForkTest is Test {
         assertEq(vm.getRecordedLogs().length, 0, "zero balance: no event");
     }
 
-    function test_fork_IncomingPolAfterInstall() public onlyFork {
-        Sweeper s = _install(ADDR_1, RECOVERY_A);
-        s.sweep();
+    function test_fork_IncomingValueReverts() public onlyFork {
+        uint256 bal = ADDR_1.balance;
+        _install(ADDR_1, RECOVERY_A);
         uint256 recBefore = RECOVERY_A.balance;
+        uint256 polSupplyHolder = address(POL).balance;
 
         address payer = makeAddr("payer");
         vm.deal(payer, 3 ether);
 
         vm.prank(payer);
         (bool ok,) = ADDR_1.call{value: 1 ether}("");
-        assertTrue(ok, "plain transfer");
+        assertFalse(ok, "plain transfer");
 
         vm.prank(payer);
-        assertTrue(POL.transfer{value: 1 ether}(ADDR_1, 1 ether), "MRC20 transfer");
+        (ok,) = ADDR_1.call{value: 1 ether, gas: 2300}("");
+        assertFalse(ok, "2300 stipend");
 
-        // Bridge deposit: 0x1001 -> ChildChain.onStateReceive -> MRC20.deposit.
+        vm.prank(payer);
+        vm.expectRevert();
+        POL.transfer{value: 1 ether}(ADDR_1, 1 ether);
+
         address childChain = POL.owner();
         address rootToken = POL.token();
         assertEq(IChildChain(childChain).tokens(rootToken), address(POL), "ChildChain maps root POL to 0x1010");
-        vm.prank(STATE_RECEIVER);
-        IChildChain(childChain)
-            .onStateReceive(1, abi.encode(ADDR_1, rootToken, uint256(1 ether), uint256(keccak256("unused-deposit-id"))));
+        bytes memory deposit = abi.encode(ADDR_1, rootToken, uint256(1 ether), uint256(keccak256("unused-deposit-id")));
 
-        assertEq(ADDR_1.balance, 3 ether, "all three accepted");
-        s.sweep();
-        assertEq(ADDR_1.balance, 0);
-        assertEq(RECOVERY_A.balance - recBefore, 3 ether);
+        // Direct 0x1001 -> ChildChain.onStateReceive -> MRC20.deposit reverts.
+        vm.prank(STATE_RECEIVER);
+        vm.expectRevert();
+        IChildChain(childChain).onStateReceive(1, deposit);
+
+        // Full state sync through StateReceiver.commitState is recorded as failed.
+        IStateReceiver sr = IStateReceiver(STATE_RECEIVER);
+        uint256 id = sr.lastStateId() + 1;
+        bytes memory record =
+            _rlpList(abi.encodePacked(_rlpUint(id), _rlpBytes(abi.encodePacked(childChain)), _rlpBytes(deposit)));
+        vm.expectEmit(STATE_RECEIVER);
+        emit StateCommitted(id, false);
+        vm.prank(SYSTEM_ADDRESS);
+        assertFalse(sr.commitState(block.timestamp, record), "state sync");
+        assertEq(sr.lastStateId(), id);
+
+        assertEq(ADDR_1.balance, bal, "nothing arrived");
+        assertEq(payer.balance, 3 ether, "payer kept its value");
+        assertEq(address(POL).balance, polSupplyHolder, "0x1010 balance unchanged");
+
+        _install(ADDR_1, RECOVERY_A).sweep();
+        assertEq(RECOVERY_A.balance - recBefore, bal);
     }
 
-    function test_fork_NoReceiveWouldBreakDeposits() public onlyFork {
-        vm.etch(ADDR_2, hex"5f5ffd");
-        address payer = makeAddr("payer");
-        vm.deal(payer, 1 ether);
-        vm.prank(payer);
-        vm.expectRevert();
-        POL.transfer{value: 1 ether}(ADDR_2, 1 ether);
+    function _rlpBytes(bytes memory b) internal pure returns (bytes memory) {
+        if (b.length == 1 && uint8(b[0]) < 0x80) return b;
+        return abi.encodePacked(_rlpLen(b.length, 0x80), b);
+    }
+
+    function _rlpUint(uint256 x) internal pure returns (bytes memory) {
+        return x == 0 ? bytes(hex"80") : _rlpBytes(_minBytes(x));
+    }
+
+    function _rlpList(bytes memory payload) internal pure returns (bytes memory) {
+        return abi.encodePacked(_rlpLen(payload.length, 0xc0), payload);
+    }
+
+    function _rlpLen(uint256 len, uint8 offset) internal pure returns (bytes memory) {
+        if (len <= 55) return abi.encodePacked(uint8(offset + len));
+        bytes memory l = _minBytes(len);
+        return abi.encodePacked(uint8(offset + 55 + l.length), l);
+    }
+
+    function _minBytes(uint256 x) internal pure returns (bytes memory out) {
+        uint256 n;
+        for (uint256 y = x; y != 0; y >>= 8) {
+            n++;
+        }
+        out = new bytes(n);
+        for (uint256 k; k < n; k++) {
+            out[n - 1 - k] = bytes1(uint8(x >> (8 * k)));
+        }
     }
 
     function test_fork_RecoveryRealSafe() public onlyFork {

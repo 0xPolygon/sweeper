@@ -188,19 +188,24 @@ contract SweeperTest is Test {
         assertEq(address(s).balance, 1 ether);
     }
 
-    function test_ReceivesPolWithLowGasStipend() public {
+    function test_RejectsNativeValue() public {
         address payer = makeAddr("payer");
-        vm.deal(payer, 2 ether);
+        vm.deal(payer, 3 ether);
 
         vm.prank(payer);
-        payable(address(sweeper)).transfer(1 ether);
+        (bool ok,) = address(sweeper).call{value: 1 ether}("");
+        assertFalse(ok, "plain call");
         vm.prank(payer);
-        (bool ok,) = address(sweeper).call{value: 1 ether, gas: 5000}("");
-        assertTrue(ok);
-        assertEq(address(sweeper).balance, 2 ether);
+        (ok,) = address(sweeper).call{value: 1 ether, gas: 2300}("");
+        assertFalse(ok, "2300 stipend");
+        vm.prank(payer);
+        assertFalse(payable(address(sweeper)).send(1 ether), "send");
+        vm.prank(payer);
+        (ok,) = address(sweeper).call{value: 1 ether}(abi.encodeCall(Sweeper.sweep, ()));
+        assertFalse(ok, "value with sweep()");
 
-        sweeper.sweep();
-        assertEq(RECOVERY.balance, 2 ether);
+        assertEq(address(sweeper).balance, 0);
+        assertEq(payer.balance, 3 ether);
     }
 
     function test_ConstructorRejectsZeroRecovery() public {
